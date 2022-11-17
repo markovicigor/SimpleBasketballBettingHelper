@@ -1,5 +1,6 @@
 ﻿using BBallByStats.BettingPlace;
 using BBallByStats.Common;
+using BBallByStats.ExceptionHandler;
 using BBallByStats.Models;
 using BBallByStats.Repository;
 using Microsoft.AspNetCore.Http;
@@ -36,10 +37,6 @@ namespace BBallByStats.Controllers
         [HttpGet]
         public async Task<ActionResult<IEnumerable<Game>>> GetGames()
         {
-            //await WriteGamesToDB();
-           
-            //await getGameLimitsFromBettingSite("MaxBet"); 
-            //await getPercentOfUnderLimits();
             if (_dbContext.Games == null)
             {
                 return NotFound();
@@ -52,26 +49,24 @@ namespace BBallByStats.Controllers
         //Writing game score in DataBase
         protected async Task WriteGamesToDB()
         {
+            
             List<Datum> GamesToDB = await getGamesFromUrl();
 
             foreach(var game in GamesToDB)
             {
-                Game g = new Game(game.id, game.home_team.id, game.visitor_team.id, game.home_team_score, game.visitor_team_score, game.date,game.home_team.full_name,game.visitor_team.full_name);
+                Game g = new Game(game.id, game.home_team.id, game.visitor_team.id, game.home_team_score,
+                    game.visitor_team_score, game.date,game.home_team.full_name,game.visitor_team.full_name);
                 try
                 {
                     if(_dbContext.Games.ToList().Find(x=>x.GameId == game.id) == null)
                     {
                         if(game.home_team_score != 0 || game.visitor_team_score !=0)
                         _dbContext.Games.Add(g); 
-                    }
-                    
-                    
-                  
-                    
+                    }    
                 }
-                catch (Exception ex)
+                catch (CustomException ex)
                 {
-                    throw new Exception(ex.ToString());
+                    throw new CustomException(ex.Message, ex.InnerException!);
                 }
 
             }
@@ -88,15 +83,18 @@ namespace BBallByStats.Controllers
                 string startDate = getDate(DateTime.Today.AddDays(-2));
                 string endDate = getDate(DateTime.Today.AddDays(+2));   
                 Uri uri = new Uri($"https://www.balldontlie.io/api/v1/games?start_date={startDate}&end_date={endDate}&per_page=100");
-                var response = await client.GetFromJsonAsync<Common.Root>(uri);
-                if (response != null)
+                try
                 {
-                    foreach(var g in response.data.ToList())
+                    var response = await client.GetFromJsonAsync<Common.Root>(uri); 
+                    if (response != null)
                     {
-                        gamesFromResponse.Add(g);
+                        gamesFromResponse.AddRange(response.data.ToList());
                     }
                 }
-
+                catch(CustomException ex)
+                {
+                    throw new CustomException(ex.Message,ex.InnerException!);
+                }
                 return gamesFromResponse;
             
         }
@@ -116,42 +114,22 @@ namespace BBallByStats.Controllers
             try
             {
                 string str = await client.GetStringAsync(uri);
-
                 JObject json = JObject.Parse(str);
-
                 var response = json.ToObject<BettingPlace.Root>();
-
-
-                //var response = await client.GetFromJsonAsync<BettingPlace.Root>(uri,options);
-              // var response = await JsonSerializer.Deserialize<BettingPlace.Root>(uri., options);
                 if (response != null)
                 {
-                    foreach (var g in response.matchList.ToList())
-                    {
-                        gamesFromResponse.Add(g);
-                    }
+                    gamesFromResponse.AddRange(response.matchList.ToList());
                 }
             }
-            catch (Exception ex)
+            catch (CustomException ex)
             {
-                Console.WriteLine(ex.Message);
+                throw new CustomException(ex.Message, ex.InnerException!);
             }
-
-
 
             return gamesFromResponse;
 
         }
-        protected async Task getGameLimitsFromBettingSite(string bettingSiteName)
-        {
-            switch(bettingSiteName)
-            {
-                case "MaxBet":
-                    await getGamesToCompareFromMaxBet();
-                    break;
-
-            }
-        }
+        
         //convert MaxBet games from json type to BetGame type
         
         protected async Task<List<BetGame>> getGamesToCompareFromMaxBet()
@@ -173,17 +151,12 @@ namespace BBallByStats.Controllers
                 over = types.ToList().Find(x => x.tipType == "G_PLUS")!.value;
 
                 BetGame betGame = new BetGame(game.home, game.away, limit, over, under);
-                //betGame.Percents = await getPercentOfUnderLimits();
                 betGames.Add(betGame);
-
-
             }
             return  betGames;
         }
         protected async Task<Dictionary<string,Percent>> getPercentOfUnderLimits()
         {
-            
-            
             List<Game> gamesFromDatabase = _dbContext.Games.ToList();
             List<BetGame> betGames = await getGamesToCompareFromMaxBet();
             Dictionary<string, Percent> percentByTeam = new Dictionary<string, Percent>();
@@ -227,18 +200,18 @@ namespace BBallByStats.Controllers
                 {
                     if(compareTwoNames(kvp.Key,betGame.HomeTeam,betGame.AwayTeam))
                     { 
-                        
                         var underGames = kvp.Value.TotalPoints.Where(x => x < betGame.Limit).Count();
                         percentByTeam[kvp.Key].Under = underGames;
                        
                         if(percentByTeam.Values.ToList().Find(x => x.BetGame.HomeTeam == betGame.HomeTeam) == null)
                             percentByTeam[kvp.Key].BetGame = betGame;
+
                         percentByTeam[kvp.Key].UnderPercent = (percentByTeam[kvp.Key].Under / percentByTeam[kvp.Key].TotalPoints.Count())*100;
                        
                     }
-                
                 }
             }
+
             foreach (KeyValuePair<string, Percent> kvp in percentByTeam)
             {
 
@@ -252,6 +225,7 @@ namespace BBallByStats.Controllers
                     string homeTeamName = kvp.Value.BetGame.HomeTeam;
                     string guestTeamModified = stringModifier(guestTeamName);
                     string homeTeamModified = stringModifier(homeTeamName);
+
                     percentByTeam[homeTeamModified].UnderBoth = percentByTeam[guestTeamModified].Under + percentByTeam[homeTeamModified].Under;
                     percentByTeam[guestTeamModified].UnderBoth = percentByTeam[homeTeamModified].UnderBoth;
                     var bothGames = percentByTeam[guestTeamModified].TotalPoints.Count() + percentByTeam[homeTeamModified].TotalPoints.Count();
@@ -259,7 +233,7 @@ namespace BBallByStats.Controllers
                     percentByTeam[homeTeamModified].PercentBoth = Math.Round((percentByTeam[homeTeamModified].UnderBoth / bothGames) * 100,2);
                     percentByTeam[guestTeamModified].PercentBoth = Math.Round((percentByTeam[guestTeamModified].UnderBoth / bothGames) * 100,2);
                     var clipers = percentByTeam[homeTeamModified];
-                    //var dict = await homeAwayTeam(kvp.Value.BetGame.HomeTeam, percentByTeam[guestTeamModified]);
+                   
                 }
 
             }
@@ -314,10 +288,6 @@ namespace BBallByStats.Controllers
             {
                 name3 = "Los Angeles Lakers";
             }
-
-           /*string nameSplit = name1.Split(' ').FirstOrDefault()!;
-            string name2Split = name2.Split(' ').FirstOrDefault()!;
-            string name3Split = name3.Split(' ').FirstOrDefault()!;*/
 
             if (name1.Contains(name2) || name1.Contains(name3))
             {
